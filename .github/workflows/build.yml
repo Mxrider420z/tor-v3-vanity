@@ -1,0 +1,108 @@
+name: Build
+
+on:
+  push:
+    branches: [main, test]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.11
+        with:
+          cuda: '12.2.0'
+          method: 'network'
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: nvptx64-nvidia-cuda
+
+      - name: Install ptx-linker
+        run: cargo install ptx-linker
+
+      - name: Build CLI
+        run: cargo +nightly build --release --no-default-features
+
+      - name: Build GUI
+        run: cargo +nightly build --release
+
+      - name: Upload Linux CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3v-linux
+          path: target/release/t3v
+
+      - name: Upload Linux GUI
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3v-gui-linux
+          path: target/release/t3v-gui
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.11
+        with:
+          cuda: '12.2.0'
+          method: 'network'
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: nvptx64-nvidia-cuda
+
+      - name: Install ptx-linker
+        run: cargo install ptx-linker
+
+      - name: Build CLI
+        run: cargo +nightly build --release --no-default-features
+
+      - name: Build GUI
+        run: cargo +nightly build --release
+
+      - name: Upload Windows CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3v-windows
+          path: target/release/t3v.exe
+
+      - name: Upload Windows GUI
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3v-gui-windows
+          path: target/release/t3v-gui.exe
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            t3v-linux/t3v
+            t3v-gui-linux/t3v-gui
+            t3v-windows/t3v.exe
+            t3v-gui-windows/t3v-gui.exe
+          draft: false
+          prerelease: false
