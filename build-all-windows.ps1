@@ -96,13 +96,52 @@ if (-not $SkipCuda) {
     }
 
     if (-not $SkipCuda) {
-        # Clone CUDA project if not present
+        # Download CUDA project if not present
         $cudaProjectDir = Join-Path $ScriptDir "torv3_vanity_addr_cuda"
         if (-not (Test-Path $cudaProjectDir)) {
-            Write-Host "[INFO] Cloning CUDA project..." -ForegroundColor White
-            git clone https://github.com/Danukeru/torv3_vanity_addr_cuda.git $cudaProjectDir
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[ERROR] Failed to clone CUDA project" -ForegroundColor Red
+            Write-Host "[INFO] Downloading CUDA project..." -ForegroundColor White
+
+            # Try git first, fall back to zip download
+            $gitPath = Get-Command git -ErrorAction SilentlyContinue
+            $downloaded = $false
+
+            if ($gitPath) {
+                git clone https://github.com/Danukeru/torv3_vanity_addr_cuda.git $cudaProjectDir 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $downloaded = $true
+                    Write-Host "[OK] Cloned via git" -ForegroundColor Green
+                }
+            }
+
+            if (-not $downloaded) {
+                # Download as zip (no git required)
+                $zipUrl = "https://github.com/Danukeru/torv3_vanity_addr_cuda/archive/refs/heads/master.zip"
+                $zipFile = Join-Path $ScriptDir "cuda_project.zip"
+
+                try {
+                    Write-Host "[INFO] Downloading from GitHub (no git required)..." -ForegroundColor White
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing
+
+                    Write-Host "[INFO] Extracting..." -ForegroundColor White
+                    Expand-Archive -Path $zipFile -DestinationPath $ScriptDir -Force
+
+                    # Rename extracted folder (GitHub adds -master suffix)
+                    $extractedDir = Join-Path $ScriptDir "torv3_vanity_addr_cuda-master"
+                    if (Test-Path $extractedDir) {
+                        Rename-Item $extractedDir $cudaProjectDir
+                    }
+
+                    Remove-Item $zipFile -Force
+                    $downloaded = $true
+                    Write-Host "[OK] Downloaded and extracted" -ForegroundColor Green
+                } catch {
+                    Write-Host "[ERROR] Failed to download CUDA project: $_" -ForegroundColor Red
+                }
+            }
+
+            if (-not $downloaded) {
+                Write-Host "[ERROR] Failed to get CUDA project" -ForegroundColor Red
                 $SkipCuda = $true
             }
         }
