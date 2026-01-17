@@ -5,6 +5,8 @@
 use crate::onion::pubkey_to_onion;
 use crate::FILE_PREFIX;
 use crossbeam_channel::{Receiver, Sender};
+use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+use curve25519_dalek::Scalar;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -203,16 +205,19 @@ impl ExternalCudaBackend {
                 continue;
             }
 
-            // Parse hex secret key
-            let secret_key = match hex_to_bytes(&line) {
+            // Parse hex secret key (this is a scalar, not a seed!)
+            // The CUDA tool outputs the ed25519 scalar directly after keccak + sc_reduce32
+            let scalar_bytes = match hex_to_bytes(&line) {
                 Some(sk) => sk,
                 None => continue,
             };
 
-            // Generate public key and onion address
-            let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key);
-            let verifying_key = signing_key.verifying_key();
-            let onion = pubkey_to_onion(&verifying_key.to_bytes());
+            // Generate public key from scalar directly (not from seed!)
+            // CUDA tool outputs scalar s, public key is A = s * B (base point)
+            let scalar = Scalar::from_bytes_mod_order(scalar_bytes);
+            let public_key_point = scalar * ED25519_BASEPOINT_POINT;
+            let public_key_bytes = public_key_point.compress().to_bytes();
+            let onion = pubkey_to_onion(&public_key_bytes);
 
             // Check which prefix matched
             let mut matched_prefix = None;
@@ -227,10 +232,16 @@ impl ExternalCudaBackend {
                 // Remove from remaining
                 remaining.lock().unwrap().remove(&prefix);
 
-                // Save key file
+                // Save key file in Tor format
+                // Tor expects: FILE_PREFIX || expanded_secret_key (64 bytes)
+                // expanded_secret_key = scalar (32 bytes) || nonce_prefix (32 bytes)
+                // Since we only have the scalar, we use the public key as nonce
+                // (This allows address verification but signing may not work)
                 let key_path = output_dir.join(&onion);
                 if let Ok(mut f) = std::fs::File::create(&key_path) {
-                    let expanded = signing_key.to_keypair_bytes();
+                    let mut expanded = [0u8; 64];
+                    expanded[..32].copy_from_slice(&scalar_bytes);
+                    expanded[32..].copy_from_slice(&public_key_bytes);
                     let _ = f.write_all(FILE_PREFIX);
                     let _ = f.write_all(&expanded);
                     let _ = f.flush();

@@ -3778,6 +3778,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
+ "curve25519-dalek",
  "ed25519-dalek",
  "num_cpus",
  "ptx-builder",
