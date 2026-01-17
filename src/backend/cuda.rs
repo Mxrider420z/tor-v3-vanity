@@ -113,6 +113,7 @@ impl CudaBackend {
 
         // Spawn a thread for each GPU
         let mut handles = Vec::new();
+        let gpu_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         for device_idx in 0..self.device_count {
             let prefixes = prefixes.clone();
@@ -121,17 +122,22 @@ impl CudaBackend {
             let remaining = remaining.clone();
             let counter = counter.clone();
             let stopped = stopped.clone();
+            let gpu_error = gpu_error.clone();
 
             let handle = std::thread::spawn(move || {
-                Self::gpu_worker(
+                if let Err(e) = Self::gpu_worker(
                     device_idx as u32,
                     prefixes,
                     output_dir,
                     result_tx,
                     remaining,
                     counter,
-                    stopped,
-                )
+                    stopped.clone(),
+                ) {
+                    eprintln!("GPU {} error: {}", device_idx, e);
+                    *gpu_error.lock().unwrap() = Some(format!("GPU {} error: {}", device_idx, e));
+                    stopped.store(true, Ordering::SeqCst);
+                }
             });
 
             handles.push(handle);
@@ -188,6 +194,11 @@ impl CudaBackend {
             let _ = handle.join();
         }
         let _ = progress_handle.join();
+
+        // Check for GPU errors
+        if let Some(err) = gpu_error.lock().unwrap().take() {
+            return Err(GeneratorError::Cuda(err));
+        }
 
         if stopped.load(Ordering::SeqCst) && !remaining.lock().unwrap().is_empty() {
             Err(GeneratorError::Stopped)
