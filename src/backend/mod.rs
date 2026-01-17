@@ -4,6 +4,7 @@
 //! backends (CUDA GPU, CPU, and Hybrid CPU+GPU) for generating Tor v3 vanity addresses.
 
 mod cpu;
+mod external_cuda;
 
 #[cfg(feature = "cuda")]
 mod cuda;
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub use cpu::CpuBackend;
+pub use external_cuda::ExternalCudaBackend;
 
 #[cfg(feature = "cuda")]
 pub use cuda::CudaBackend;
@@ -69,6 +71,7 @@ pub struct BackendInfo {
 #[derive(Debug, Clone)]
 pub enum Backend {
     Cpu(CpuBackend),
+    ExternalCuda(ExternalCudaBackend),
     #[cfg(feature = "cuda")]
     Cuda(CudaBackend),
     #[cfg(feature = "cuda")]
@@ -80,11 +83,9 @@ pub enum Backend {
 pub enum BackendMode {
     /// CPU only (always available)
     Cpu,
-    /// GPU only (requires CUDA)
-    #[cfg(feature = "cuda")]
+    /// GPU only (CUDA - built-in or external)
     Cuda,
-    /// CPU + GPU combined (requires CUDA)
-    #[cfg(feature = "cuda")]
+    /// CPU + GPU combined (CUDA)
     Hybrid,
     /// Automatically select best available
     Auto,
@@ -101,6 +102,7 @@ impl Backend {
     pub fn info(&self) -> BackendInfo {
         match self {
             Backend::Cpu(b) => b.info(),
+            Backend::ExternalCuda(b) => b.info(),
             #[cfg(feature = "cuda")]
             Backend::Cuda(b) => b.info(),
             #[cfg(feature = "cuda")]
@@ -119,6 +121,7 @@ impl Backend {
     ) -> Result<(), GeneratorError> {
         match self {
             Backend::Cpu(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
+            Backend::ExternalCuda(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
             #[cfg(feature = "cuda")]
             Backend::Cuda(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
             #[cfg(feature = "cuda")]
@@ -142,13 +145,40 @@ pub fn select_backend_with_config(mode: BackendMode, cpu_threads: usize) -> Back
         }
         #[cfg(feature = "cuda")]
         BackendMode::Cuda => {
+            // Try built-in CUDA first
             match CudaBackend::new() {
                 Ok(cuda) => {
                     print_backend_info(&cuda.info());
                     Backend::Cuda(cuda)
                 }
                 Err(e) => {
-                    eprintln!("CUDA not available ({}), falling back to CPU", e);
+                    eprintln!("Built-in CUDA not available ({}), trying external...", e);
+                    // Fall back to external CUDA
+                    match ExternalCudaBackend::new() {
+                        Ok(ext) => {
+                            print_backend_info(&ext.info());
+                            Backend::ExternalCuda(ext)
+                        }
+                        Err(e2) => {
+                            eprintln!("External CUDA not available ({}), falling back to CPU", e2);
+                            let cpu = CpuBackend::with_threads(cpu_threads);
+                            print_backend_info(&cpu.info());
+                            Backend::Cpu(cpu)
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        BackendMode::Cuda => {
+            // Try external CUDA when built-in CUDA feature is disabled
+            match ExternalCudaBackend::new() {
+                Ok(ext) => {
+                    print_backend_info(&ext.info());
+                    Backend::ExternalCuda(ext)
+                }
+                Err(e) => {
+                    eprintln!("External CUDA not available ({}), falling back to CPU", e);
                     let cpu = CpuBackend::with_threads(cpu_threads);
                     print_backend_info(&cpu.info());
                     Backend::Cpu(cpu)
@@ -163,7 +193,33 @@ pub fn select_backend_with_config(mode: BackendMode, cpu_threads: usize) -> Back
                     Backend::Hybrid(hybrid)
                 }
                 Err(e) => {
-                    eprintln!("Hybrid mode not available ({}), falling back to CPU", e);
+                    eprintln!("Hybrid mode not available ({}), trying external CUDA...", e);
+                    // Fall back to external CUDA
+                    match ExternalCudaBackend::new() {
+                        Ok(ext) => {
+                            print_backend_info(&ext.info());
+                            Backend::ExternalCuda(ext)
+                        }
+                        Err(e2) => {
+                            eprintln!("External CUDA not available ({}), falling back to CPU", e2);
+                            let cpu = CpuBackend::with_threads(cpu_threads);
+                            print_backend_info(&cpu.info());
+                            Backend::Cpu(cpu)
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        BackendMode::Hybrid => {
+            // Try external CUDA for hybrid mode when built-in CUDA is disabled
+            match ExternalCudaBackend::new() {
+                Ok(ext) => {
+                    print_backend_info(&ext.info());
+                    Backend::ExternalCuda(ext)
+                }
+                Err(e) => {
+                    eprintln!("External CUDA not available ({}), falling back to CPU", e);
                     let cpu = CpuBackend::with_threads(cpu_threads);
                     print_backend_info(&cpu.info());
                     Backend::Cpu(cpu)
@@ -196,8 +252,19 @@ fn select_backend_auto(cpu_threads: usize) -> Backend {
                 return Backend::Cuda(cuda);
             }
             Err(e) => {
-                eprintln!("CUDA not available: {}", e);
+                eprintln!("Built-in CUDA not available: {}", e);
             }
+        }
+    }
+
+    // Try external CUDA
+    match ExternalCudaBackend::new() {
+        Ok(ext) => {
+            print_backend_info(&ext.info());
+            return Backend::ExternalCuda(ext);
+        }
+        Err(e) => {
+            eprintln!("External CUDA not available: {}", e);
         }
     }
 

@@ -53,9 +53,7 @@ pub struct VanityApp {
 enum BackendModeSelection {
     Auto,
     Cpu,
-    #[cfg(feature = "cuda")]
     Cuda,
-    #[cfg(feature = "cuda")]
     Hybrid,
 }
 
@@ -64,9 +62,7 @@ impl BackendModeSelection {
         match self {
             Self::Auto => "Auto (best available)",
             Self::Cpu => "CPU only",
-            #[cfg(feature = "cuda")]
             Self::Cuda => "GPU only (CUDA)",
-            #[cfg(feature = "cuda")]
             Self::Hybrid => "Hybrid (CPU + GPU)",
         }
     }
@@ -75,9 +71,7 @@ impl BackendModeSelection {
         match self {
             Self::Auto => BackendMode::Auto,
             Self::Cpu => BackendMode::Cpu,
-            #[cfg(feature = "cuda")]
             Self::Cuda => BackendMode::Cuda,
-            #[cfg(feature = "cuda")]
             Self::Hybrid => BackendMode::Hybrid,
         }
     }
@@ -300,32 +294,24 @@ impl eframe::App for VanityApp {
                             BackendModeSelection::Cpu,
                             BackendModeSelection::Cpu.as_str(),
                         );
-                        #[cfg(feature = "cuda")]
-                        {
-                            ui.selectable_value(
-                                &mut self.selected_mode,
-                                BackendModeSelection::Cuda,
-                                BackendModeSelection::Cuda.as_str(),
-                            );
-                            ui.selectable_value(
-                                &mut self.selected_mode,
-                                BackendModeSelection::Hybrid,
-                                BackendModeSelection::Hybrid.as_str(),
-                            );
-                        }
+                        ui.selectable_value(
+                            &mut self.selected_mode,
+                            BackendModeSelection::Cuda,
+                            BackendModeSelection::Cuda.as_str(),
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_mode,
+                            BackendModeSelection::Hybrid,
+                            BackendModeSelection::Hybrid.as_str(),
+                        );
                     });
             });
 
-            // CPU threads slider (only shown for CPU/Hybrid modes)
-            #[allow(unused_mut)]
-            let mut show_threads = matches!(
+            // CPU threads slider (shown for CPU/Hybrid/Auto modes)
+            let show_threads = matches!(
                 self.selected_mode,
-                BackendModeSelection::Cpu | BackendModeSelection::Auto
+                BackendModeSelection::Cpu | BackendModeSelection::Auto | BackendModeSelection::Hybrid
             );
-            #[cfg(feature = "cuda")]
-            {
-                show_threads = show_threads || matches!(self.selected_mode, BackendModeSelection::Hybrid);
-            }
             if show_threads {
                 ui.horizontal(|ui| {
                     ui.label("CPU Threads:");
