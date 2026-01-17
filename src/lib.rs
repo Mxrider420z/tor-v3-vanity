@@ -14,3 +14,6 @@ pub use onion::pubkey_to_onion;
 
 /// File prefix for Tor ed25519 secret key files
 pub const FILE_PREFIX: &[u8] = b"== ed25519v1-secret: type0 ==\0\0\0";
+
+/// File prefix for Tor ed25519 public key files
+pub const PUBKEY_PREFIX: &[u8] = b"== ed25519v1-public: type0 ==\0\0\0";

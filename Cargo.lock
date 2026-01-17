@@ -3785,6 +3785,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "rustacuda",
+ "sha2",
  "sha3",
  "thiserror 1.0.69",
  "tor-v3-vanity-core",

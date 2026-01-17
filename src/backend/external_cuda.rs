@@ -3,7 +3,7 @@
 //! This backend spawns an external CUDA process for GPU-accelerated generation.
 
 use crate::onion::pubkey_to_onion;
-use crate::FILE_PREFIX;
+use crate::{FILE_PREFIX, PUBKEY_PREFIX};
 use crossbeam_channel::{Receiver, Sender};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::Scalar;
@@ -232,24 +232,44 @@ impl ExternalCudaBackend {
                 // Remove from remaining
                 remaining.lock().unwrap().remove(&prefix);
 
-                // Save key file in Tor format
-                // Tor expects: FILE_PREFIX || expanded_secret_key (64 bytes)
-                // expanded_secret_key = scalar (32 bytes) || nonce_prefix (32 bytes)
-                // Since we only have the scalar, we use the public key as nonce
-                // (This allows address verification but signing may not work)
-                let key_path = output_dir.join(&onion);
-                if let Ok(mut f) = std::fs::File::create(&key_path) {
-                    let mut expanded = [0u8; 64];
-                    expanded[..32].copy_from_slice(&scalar_bytes);
-                    expanded[32..].copy_from_slice(&public_key_bytes);
-                    let _ = f.write_all(FILE_PREFIX);
-                    let _ = f.write_all(&expanded);
-                    let _ = f.flush();
+                // Create Tor hidden service directory structure
+                // Strip .onion suffix for directory name
+                let dir_name = onion.trim_end_matches(".onion");
+                let hs_dir = output_dir.join(dir_name);
+
+                if std::fs::create_dir_all(&hs_dir).is_ok() {
+                    // 1. Write hostname file
+                    let hostname_path = hs_dir.join("hostname");
+                    if let Ok(mut f) = std::fs::File::create(&hostname_path) {
+                        let _ = writeln!(f, "{}", onion);
+                    }
+
+                    // 2. Write hs_ed25519_public_key (32-byte tag + 32-byte pubkey)
+                    let pubkey_path = hs_dir.join("hs_ed25519_public_key");
+                    if let Ok(mut f) = std::fs::File::create(&pubkey_path) {
+                        let _ = f.write_all(PUBKEY_PREFIX);
+                        let _ = f.write_all(&public_key_bytes);
+                    }
+
+                    // 3. Write hs_ed25519_secret_key (32-byte tag + 64-byte expanded key)
+                    // expanded_secret_key = scalar (32 bytes) || nonce_prefix (32 bytes)
+                    // Since we only have the scalar from CUDA, use pubkey as nonce placeholder
+                    let secret_path = hs_dir.join("hs_ed25519_secret_key");
+                    if let Ok(mut f) = std::fs::File::create(&secret_path) {
+                        let mut expanded = [0u8; 64];
+                        expanded[..32].copy_from_slice(&scalar_bytes);
+                        expanded[32..].copy_from_slice(&public_key_bytes);
+                        let _ = f.write_all(FILE_PREFIX);
+                        let _ = f.write_all(&expanded);
+                    }
+
+                    // 4. Create authorized_clients directory (required by Tor)
+                    let _ = std::fs::create_dir_all(hs_dir.join("authorized_clients"));
 
                     let _ = result_tx.send(FoundKey {
                         prefix,
                         onion_address: onion,
-                        key_path,
+                        key_path: hs_dir,
                     });
                 }
 
