@@ -7,7 +7,7 @@ use crossbeam_channel::unbounded;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use tor_v3_vanity::backend::{select_backend_with_mode, BackendMode, Progress};
+use tor_v3_vanity::backend::{select_backend_with_mode, select_backend_with_config, BackendMode, Progress, SearchFilter};
 
 #[derive(Parser)]
 #[command(name = "t3v")]
@@ -29,6 +29,11 @@ struct Cli {
     /// Number of CPU threads (only used in cpu and hybrid modes)
     #[arg(short = 't', long, default_value_t = num_cpus::get())]
     threads: usize,
+
+    /// Words that must also appear in the address (in addition to prefix)
+    /// Can be specified multiple times: --contains block --contains chain
+    #[arg(short = 'c', long = "contains", value_name = "WORD")]
+    contains: Vec<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -112,6 +117,9 @@ fn main() {
 
     println!("=== Tor V3 Vanity Generator ===");
     println!("Prefixes: {:?}", cli.prefixes);
+    if !cli.contains.is_empty() {
+        println!("Must contain: {:?}", cli.contains);
+    }
     println!("Output: {}", cli.dst.display());
     println!("CPU threads: {}", cli.threads);
     println!();
@@ -140,10 +148,13 @@ fn main() {
     // Clone values for threads
     let prefixes = cli.prefixes.clone();
     let dst = cli.dst.clone();
+    let filter = SearchFilter {
+        contains: cli.contains.clone(),
+    };
 
     // Spawn generation thread
     let gen_handle = std::thread::spawn(move || {
-        backend.generate(prefixes, dst, progress_tx, result_tx, stop_rx)
+        backend.generate_with_filter(prefixes, dst, progress_tx, result_tx, stop_rx, filter)
     });
 
     // Progress display thread

@@ -10,13 +10,14 @@ use std::time::Instant;
 
 use tor_v3_vanity::backend::{
     select_backend, select_backend_with_config, BackendInfo, BackendMode, FoundKey,
-    Progress,
+    Progress, SearchFilter,
 };
 
 /// Application state
 pub struct VanityApp {
     // Input fields
     prefix_input: String,
+    contains_input: String,
     output_dir: String,
 
     // Backend selection
@@ -103,6 +104,7 @@ impl VanityApp {
 
         Self {
             prefix_input: String::new(),
+            contains_input: String::new(),
             output_dir,
             selected_mode: BackendModeSelection::Auto,
             cpu_threads: max_threads,
@@ -174,6 +176,16 @@ impl VanityApp {
         self.progress_rx = Some(progress_rx);
         self.result_rx = Some(result_rx);
 
+        // Parse contains filter
+        let contains: Vec<String> = self
+            .contains_input
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let filter = SearchFilter { contains };
+
         // Spawn worker thread
         let backend_mode = self.selected_mode.to_backend_mode();
         let cpu_threads = self.cpu_threads;
@@ -195,7 +207,7 @@ impl VanityApp {
                 let _ = stop_tx.send(());
             });
 
-            if let Err(e) = backend.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx) {
+            if let Err(e) = backend.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, filter) {
                 let _ = error_tx.send(format!("Generation error: {}", e));
             }
         });
@@ -334,6 +346,17 @@ impl eframe::App for VanityApp {
                     .desired_width(f32::INFINITY),
             );
             ui.small("Tip: Use lowercase letters and numbers (base32). 5-6 chars recommended.");
+
+            ui.add_space(10.0);
+
+            // Contains filter input
+            ui.label("Must also contain (optional, comma-separated):");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.contains_input)
+                    .hint_text("block,chain")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.small("Words that must appear anywhere in the address (in addition to prefix).");
 
             ui.add_space(10.0);
 

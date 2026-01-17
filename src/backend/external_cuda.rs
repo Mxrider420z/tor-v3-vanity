@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{BackendInfo, FoundKey, GeneratorError, Progress};
+use super::{BackendInfo, FoundKey, GeneratorError, Progress, SearchFilter};
 
 /// External CUDA backend that spawns vanity_torv3_cuda executable
 #[derive(Debug, Clone)]
@@ -86,6 +86,19 @@ impl ExternalCudaBackend {
         result_tx: Sender<FoundKey>,
         stop_rx: Receiver<()>,
     ) -> Result<(), GeneratorError> {
+        self.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, SearchFilter::default())
+    }
+
+    /// Start generation using external CUDA process with additional filter
+    pub fn generate_with_filter(
+        &self,
+        prefixes: Vec<String>,
+        output_dir: PathBuf,
+        progress_tx: Sender<Progress>,
+        result_tx: Sender<FoundKey>,
+        stop_rx: Receiver<()>,
+        filter: SearchFilter,
+    ) -> Result<(), GeneratorError> {
         // Validate prefixes
         for prefix in &prefixes {
             if base32::decode(
@@ -130,6 +143,9 @@ impl ExternalCudaBackend {
         let stopped = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
         let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+
+        // Prepare contains words (lowercase for case-insensitive matching)
+        let contains_words: Vec<String> = filter.contains.iter().map(|w| w.to_lowercase()).collect();
 
         // Stop signal handler
         let stop_stopped = stopped.clone();
@@ -225,6 +241,15 @@ impl ExternalCudaBackend {
                 if onion.to_lowercase().starts_with(&prefix.to_lowercase()) {
                     matched_prefix = Some(prefix.clone());
                     break;
+                }
+            }
+
+            // Check if address also contains all required words
+            if matched_prefix.is_some() && !contains_words.is_empty() {
+                let onion_lower = onion.to_lowercase();
+                if !contains_words.iter().all(|word| onion_lower.contains(word)) {
+                    // Prefix matched but contains filter failed - skip this address
+                    matched_prefix = None;
                 }
             }
 

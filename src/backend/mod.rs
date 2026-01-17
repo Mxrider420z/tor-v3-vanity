@@ -60,6 +60,13 @@ pub struct FoundKey {
     pub key_path: PathBuf,
 }
 
+/// Filter configuration for vanity address search
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilter {
+    /// Words that must appear somewhere in the onion address (case-insensitive)
+    pub contains: Vec<String>,
+}
+
 /// Information about a computation backend
 #[derive(Debug, Clone)]
 pub struct BackendInfo {
@@ -119,9 +126,25 @@ impl Backend {
         result_tx: Sender<FoundKey>,
         stop_rx: Receiver<()>,
     ) -> Result<(), GeneratorError> {
+        self.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, SearchFilter::default())
+    }
+
+    /// Start generation with additional filter requirements
+    ///
+    /// The filter allows specifying words that must appear somewhere in the
+    /// generated onion address (in addition to the prefix match).
+    pub fn generate_with_filter(
+        &self,
+        prefixes: Vec<String>,
+        output_dir: PathBuf,
+        progress_tx: Sender<Progress>,
+        result_tx: Sender<FoundKey>,
+        stop_rx: Receiver<()>,
+        filter: SearchFilter,
+    ) -> Result<(), GeneratorError> {
         match self {
-            Backend::Cpu(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
-            Backend::ExternalCuda(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
+            Backend::Cpu(b) => b.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, filter),
+            Backend::ExternalCuda(b) => b.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, filter),
             #[cfg(feature = "cuda")]
             Backend::Cuda(b) => b.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx),
             #[cfg(feature = "cuda")]

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{BackendInfo, FoundKey, GeneratorError, Progress};
+use super::{BackendInfo, FoundKey, GeneratorError, Progress, SearchFilter};
 
 /// CPU backend using Rayon for parallel key generation
 #[derive(Debug, Clone)]
@@ -50,6 +50,19 @@ impl CpuBackend {
         result_tx: Sender<FoundKey>,
         stop_rx: Receiver<()>,
     ) -> Result<(), GeneratorError> {
+        self.generate_with_filter(prefixes, output_dir, progress_tx, result_tx, stop_rx, SearchFilter::default())
+    }
+
+    /// Start vanity address generation with additional filter
+    pub fn generate_with_filter(
+        &self,
+        prefixes: Vec<String>,
+        output_dir: PathBuf,
+        progress_tx: Sender<Progress>,
+        result_tx: Sender<FoundKey>,
+        stop_rx: Receiver<()>,
+        filter: SearchFilter,
+    ) -> Result<(), GeneratorError> {
         // Validate prefixes
         for prefix in &prefixes {
             if base32::decode(
@@ -74,6 +87,11 @@ impl CpuBackend {
         let counter = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
+
+        // Prepare contains words (lowercase for case-insensitive matching)
+        let contains_words: Arc<Vec<String>> = Arc::new(
+            filter.contains.iter().map(|w| w.to_lowercase()).collect()
+        );
 
         // Batch size per iteration
         const BATCH_SIZE: usize = 10_000;
@@ -122,6 +140,15 @@ impl CpuBackend {
                         }
                     }
                     drop(remaining_guard);
+
+                    // Check if address also contains all required words
+                    if found_prefix.is_some() && !contains_words.is_empty() {
+                        let onion_lower = onion.to_lowercase();
+                        if !contains_words.iter().all(|word| onion_lower.contains(word)) {
+                            // Prefix matched but contains filter failed - skip this address
+                            found_prefix = None;
+                        }
+                    }
 
                     // If found, save and notify
                     if let Some(prefix) = found_prefix {

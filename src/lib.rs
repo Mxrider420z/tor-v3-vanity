@@ -8,7 +8,7 @@ pub mod onion;
 
 pub use backend::{
     select_backend, select_backend_with_mode, select_backend_with_config,
-    Backend, BackendInfo, BackendMode, GeneratorError, FoundKey, Progress, format_speed,
+    Backend, BackendInfo, BackendMode, GeneratorError, FoundKey, Progress, SearchFilter, format_speed,
 };
 pub use onion::pubkey_to_onion;
 
