@@ -129,9 +129,14 @@ impl Backend {
 
 /// Select backend based on mode
 pub fn select_backend_with_mode(mode: BackendMode) -> Backend {
+    select_backend_with_config(mode, num_cpus::get())
+}
+
+/// Select backend based on mode with specific CPU thread count
+pub fn select_backend_with_config(mode: BackendMode, cpu_threads: usize) -> Backend {
     match mode {
         BackendMode::Cpu => {
-            let cpu = CpuBackend::new();
+            let cpu = CpuBackend::with_threads(cpu_threads);
             print_backend_info(&cpu.info());
             Backend::Cpu(cpu)
         }
@@ -144,7 +149,7 @@ pub fn select_backend_with_mode(mode: BackendMode) -> Backend {
                 }
                 Err(e) => {
                     eprintln!("CUDA not available ({}), falling back to CPU", e);
-                    let cpu = CpuBackend::new();
+                    let cpu = CpuBackend::with_threads(cpu_threads);
                     print_backend_info(&cpu.info());
                     Backend::Cpu(cpu)
                 }
@@ -152,21 +157,54 @@ pub fn select_backend_with_mode(mode: BackendMode) -> Backend {
         }
         #[cfg(feature = "cuda")]
         BackendMode::Hybrid => {
-            match HybridBackend::new() {
+            match HybridBackend::with_cpu_threads(cpu_threads) {
                 Ok(hybrid) => {
                     print_backend_info(&hybrid.info());
                     Backend::Hybrid(hybrid)
                 }
                 Err(e) => {
                     eprintln!("Hybrid mode not available ({}), falling back to CPU", e);
-                    let cpu = CpuBackend::new();
+                    let cpu = CpuBackend::with_threads(cpu_threads);
                     print_backend_info(&cpu.info());
                     Backend::Cpu(cpu)
                 }
             }
         }
-        BackendMode::Auto => select_backend(),
+        BackendMode::Auto => select_backend_auto(cpu_threads),
     }
+}
+
+/// Select the best available backend with specific thread count
+fn select_backend_auto(cpu_threads: usize) -> Backend {
+    #[cfg(feature = "cuda")]
+    {
+        // Try hybrid first (CPU + GPU)
+        match HybridBackend::with_cpu_threads(cpu_threads) {
+            Ok(hybrid) => {
+                print_backend_info(&hybrid.info());
+                return Backend::Hybrid(hybrid);
+            }
+            Err(e) => {
+                eprintln!("Hybrid mode not available: {}", e);
+            }
+        }
+
+        // Try CUDA only
+        match CudaBackend::new() {
+            Ok(cuda) => {
+                print_backend_info(&cuda.info());
+                return Backend::Cuda(cuda);
+            }
+            Err(e) => {
+                eprintln!("CUDA not available: {}", e);
+            }
+        }
+    }
+
+    // Fall back to CPU
+    let cpu = CpuBackend::with_threads(cpu_threads);
+    print_backend_info(&cpu.info());
+    Backend::Cpu(cpu)
 }
 
 /// Select the best available backend automatically

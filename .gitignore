@@ -1,2 +1,5 @@
 /target
 *.onion
+target/
+dist/
+*.zip

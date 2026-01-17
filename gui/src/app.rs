@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use tor_v3_vanity::backend::{
-    select_backend, select_backend_with_mode, Backend, BackendInfo, BackendMode, FoundKey,
+    select_backend, select_backend_with_config, BackendInfo, BackendMode, FoundKey,
     Progress,
 };
 
@@ -35,6 +35,7 @@ pub struct VanityApp {
     // Channels
     progress_rx: Option<Receiver<Progress>>,
     result_rx: Option<Receiver<FoundKey>>,
+    error_rx: Option<Receiver<String>>,
 
     // Progress display
     progress: Progress,
@@ -118,6 +119,7 @@ impl VanityApp {
             stop_flag: Arc::new(AtomicBool::new(false)),
             progress_rx: None,
             result_rx: None,
+            error_rx: None,
             progress: Progress::default(),
             results: Vec::new(),
             start_time: None,
@@ -180,10 +182,15 @@ impl VanityApp {
 
         // Spawn worker thread
         let backend_mode = self.selected_mode.to_backend_mode();
+        let cpu_threads = self.cpu_threads;
         let stop_flag = self.stop_flag.clone();
 
+        // Channel to report backend errors back to GUI
+        let (error_tx, error_rx) = crossbeam_channel::bounded(1);
+        self.error_rx = Some(error_rx);
+
         let handle = std::thread::spawn(move || {
-            let backend = select_backend_with_mode(backend_mode);
+            let backend = select_backend_with_config(backend_mode, cpu_threads);
 
             // Monitor stop flag
             let monitor_stop_flag = stop_flag.clone();
@@ -194,7 +201,9 @@ impl VanityApp {
                 let _ = stop_tx.send(());
             });
 
-            let _ = backend.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx);
+            if let Err(e) = backend.generate(prefixes, output_dir, progress_tx, result_tx, stop_rx) {
+                let _ = error_tx.send(format!("Generation error: {}", e));
+            }
         });
 
         self.worker_handle = Some(handle);
@@ -220,6 +229,14 @@ impl VanityApp {
                 // Remove from pending
                 self.pending_prefixes.retain(|p| p != &result.prefix);
                 self.results.push(result);
+            }
+        }
+
+        // Check for errors from worker
+        if let Some(rx) = &self.error_rx {
+            if let Ok(error) = rx.try_recv() {
+                self.error_message = Some(error);
+                self.state = AppState::Stopped;
             }
         }
 
@@ -340,6 +357,7 @@ impl eframe::App for VanityApp {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.output_dir).desired_width(400.0),
                 );
+                #[cfg(target_os = "windows")]
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_directory(&self.output_dir)
@@ -406,8 +424,8 @@ impl eframe::App for VanityApp {
                 let max_prefix_len = self
                     .pending_prefixes
                     .iter()
-                    .chain(self.results.iter().map(|r| &r.prefix))
-                    .map(|p| p.len())
+                    .chain(self.results.iter().map(|r: &FoundKey| &r.prefix))
+                    .map(|p: &String| p.len())
                     .max()
                     .unwrap_or(5);
 
