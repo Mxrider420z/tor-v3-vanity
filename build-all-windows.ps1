@@ -148,11 +148,91 @@ if (-not $SkipCuda) {
                 Write-Host "[OK] Visual Studio environment configured" -ForegroundColor Green
             } else {
                 Write-Host "[WARN] Visual Studio Build Tools not found." -ForegroundColor Yellow
-                Write-Host "       Install from: https://visualstudio.microsoft.com/downloads/" -ForegroundColor Gray
-                Write-Host "       Select 'Desktop development with C++' workload" -ForegroundColor Gray
-                Write-Host "" -ForegroundColor Gray
-                Write-Host "       Or run this script from 'x64 Native Tools Command Prompt'" -ForegroundColor Gray
-                $SkipCuda = $true
+                Write-Host ""
+                Write-Host "Would you like to download and install Visual Studio Build Tools automatically?" -ForegroundColor Cyan
+                Write-Host "This will install the C++ build tools required for CUDA compilation." -ForegroundColor Gray
+                Write-Host ""
+                $response = Read-Host "Install now? (Y/N)"
+
+                if ($response -eq 'Y' -or $response -eq 'y') {
+                    Write-Host ""
+                    Write-Host "[INFO] Downloading Visual Studio Build Tools installer..." -ForegroundColor White
+                    $vsInstallerUrl = "https://aka.ms/vs/17/release/vs_buildtools.exe"
+                    $vsInstallerPath = Join-Path $env:TEMP "vs_buildtools.exe"
+
+                    try {
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        Invoke-WebRequest -Uri $vsInstallerUrl -OutFile $vsInstallerPath -UseBasicParsing
+                        Write-Host "[OK] Downloaded installer" -ForegroundColor Green
+
+                        Write-Host ""
+                        Write-Host "[INFO] Installing Visual Studio Build Tools with C++ workload..." -ForegroundColor White
+                        Write-Host "       This may take 5-15 minutes. Please wait..." -ForegroundColor Gray
+                        Write-Host ""
+
+                        # Install with C++ workload (VCTools) and recommended components
+                        $installArgs = @(
+                            "--quiet",
+                            "--wait",
+                            "--norestart",
+                            "--nocache",
+                            "--add", "Microsoft.VisualStudio.Workload.VCTools",
+                            "--includeRecommended"
+                        )
+
+                        $process = Start-Process -FilePath $vsInstallerPath -ArgumentList $installArgs -Wait -PassThru
+
+                        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+                            Write-Host "[OK] Visual Studio Build Tools installed successfully!" -ForegroundColor Green
+
+                            if ($process.ExitCode -eq 3010) {
+                                Write-Host "[NOTE] A restart is recommended but not required." -ForegroundColor Yellow
+                            }
+
+                            # Try to find vcvarsall again
+                            $fallbackPaths = @(
+                                "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
+                                "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+                            )
+                            foreach ($path in $fallbackPaths) {
+                                if (Test-Path $path) {
+                                    $vcvarsall = $path
+                                    break
+                                }
+                            }
+
+                            if ($vcvarsall -and (Test-Path $vcvarsall)) {
+                                Write-Host "[INFO] Configuring environment..." -ForegroundColor White
+                                cmd /c "`"$vcvarsall`" >nul 2>&1 && set" | ForEach-Object {
+                                    if ($_ -match "^([^=]+)=(.*)$") {
+                                        Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+                                    }
+                                }
+                                Write-Host "[OK] Ready to build!" -ForegroundColor Green
+                            } else {
+                                Write-Host "[WARN] Installation completed but vcvars64.bat not found." -ForegroundColor Yellow
+                                Write-Host "       Please restart this script." -ForegroundColor Gray
+                                $SkipCuda = $true
+                            }
+                        } else {
+                            Write-Host "[ERROR] Installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
+                            $SkipCuda = $true
+                        }
+
+                        # Cleanup
+                        Remove-Item $vsInstallerPath -ErrorAction SilentlyContinue
+
+                    } catch {
+                        Write-Host "[ERROR] Failed to download installer: $_" -ForegroundColor Red
+                        $SkipCuda = $true
+                    }
+                } else {
+                    Write-Host ""
+                    Write-Host "Skipping CUDA build. You can install manually from:" -ForegroundColor Gray
+                    Write-Host "https://visualstudio.microsoft.com/downloads/" -ForegroundColor Gray
+                    Write-Host "Select 'Desktop development with C++' workload" -ForegroundColor Gray
+                    $SkipCuda = $true
+                }
             }
         } else {
             Write-Host "[OK] C++ compiler already in PATH" -ForegroundColor Green
