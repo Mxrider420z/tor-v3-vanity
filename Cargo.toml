@@ -2,14 +2,19 @@
 name = "tor-v3-vanity"
 version = "0.1.0"
 authors = ["Aiden McClelland <me@drbonez.dev>"]
-edition = "2018"
-description = "A TOR v3 vanity url generator designed to run on an nvidia GPU."
+edition = "2021"
+description = "A TOR v3 vanity url generator with GPU acceleration and CPU fallback."
 license = "MIT"
-repository = "https://github.com/dr-bonez/tor-v3-vanity"
-documentation = "http://docs.rs/tor-v3-vanity"
+repository = "https://github.com/Mxrider420z/tor-v3-vanity"
 readme = "README.md"
 keywords = ["tor", "v3", "vanity", "gpu", "cuda"]
-include = ["src/**/*", "Cargo.toml", "core/**/*", "build.rs", "README.md", "LICENSE", "foo/bar"]
+
+[workspace]
+members = ["core", "gui"]
+
+[lib]
+name = "tor_v3_vanity"
+path = "src/lib.rs"
 
 [[bin]]
 name = "t3v"
@@ -17,20 +22,33 @@ test = false
 bench = false
 path = "src/main.rs"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["cuda"]
+cuda = ["dep:rustacuda", "dep:tor-v3-vanity-core"]
+ptx-builder = ["dep:ptx-builder"]
 
 [dependencies]
-base32 = "0.4.0"
-chrono = "0.4.13"
-clap = "2.33.1"
-crossbeam-channel = "0.4.3"
-ed25519-dalek = "1.0.0-pre.4"
-failure = "0.1.8"
-num_cpus = "1.13.0"
-rand = "0.7.3"
-rustacuda = "0.1.2"
-sha3 = "0.9.1"
-tor-v3-vanity-core = { version = "0.1.0", path = "./core" }
+# Core dependencies (always included)
+base32 = "0.5"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core", "hazmat"] }
+num_cpus = "1.16"
+rand = "0.8"
+rayon = "1.10"
+sha3 = "0.10"
+thiserror = "1.0"
+ctrlc = "3.4"
+
+# CUDA dependencies (optional)
+rustacuda = { version = "0.1.2", optional = true }
+tor-v3-vanity-core = { version = "0.1.0", path = "./core", optional = true }
 
 [build-dependencies]
-ptx-builder = "0.5"
+ptx-builder = { version = "0.5", optional = true }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3

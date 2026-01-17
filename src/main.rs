@@ -1,19 +1,66 @@
+//! Tor V3 Vanity Address Generator CLI
+//!
+//! A high-performance vanity address generator with GPU acceleration and CPU fallback.
+
+use clap::{Parser, ValueEnum};
+use crossbeam_channel::unbounded;
 use std::path::PathBuf;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use failure::Error;
-use sha3::{Digest, Sha3_256};
-use tor_v3_vanity_core as core;
+use tor_v3_vanity::backend::{select_backend_with_mode, BackendMode, Progress};
 
-pub struct Pubkey(pub [u8; 32]);
-impl AsRef<[u8; 32]> for Pubkey {
-    fn as_ref(&self) -> &[u8; 32] {
-        &self.0
+#[derive(Parser)]
+#[command(name = "t3v")]
+#[command(about = "Tor V3 vanity address generator with GPU acceleration")]
+#[command(version)]
+struct Cli {
+    /// Desired prefixes (comma-separated)
+    #[arg(required = true, value_delimiter = ',')]
+    prefixes: Vec<String>,
+
+    /// Output directory for generated keys
+    #[arg(short, long, default_value = ".")]
+    dst: PathBuf,
+
+    /// Backend mode
+    #[arg(short, long, value_enum, default_value = "auto")]
+    mode: Mode,
+
+    /// Number of CPU threads (only used in cpu and hybrid modes)
+    #[arg(short = 't', long, default_value_t = num_cpus::get())]
+    threads: usize,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    /// Automatically select best backend (Hybrid > CUDA > CPU)
+    Auto,
+    /// CPU only
+    Cpu,
+    /// CUDA GPU only
+    #[cfg(feature = "cuda")]
+    Cuda,
+    /// Hybrid CPU + GPU (maximum speed)
+    #[cfg(feature = "cuda")]
+    Hybrid,
+}
+
+impl From<Mode> for BackendMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::Auto => BackendMode::Auto,
+            Mode::Cpu => BackendMode::Cpu,
+            #[cfg(feature = "cuda")]
+            Mode::Cuda => BackendMode::Cuda,
+            #[cfg(feature = "cuda")]
+            Mode::Hybrid => BackendMode::Hybrid,
+        }
     }
 }
 
-pub struct PrettyDur(chrono::Duration);
+/// Pretty duration formatter
+struct PrettyDur(chrono::Duration);
+
 impl std::fmt::Display for PrettyDur {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.0.num_weeks() >= 52 {
@@ -35,273 +82,155 @@ impl std::fmt::Display for PrettyDur {
     }
 }
 
-pub fn pubkey_to_onion(pubkey: &[u8; 32]) -> String {
-    let mut hasher = Sha3_256::new();
-    hasher.update(b".onion checksum");
-    hasher.update(pubkey);
-    hasher.update(&[3]);
-    let mut onion = [0; 35];
-    onion[..32].clone_from_slice(pubkey);
-    onion[32..34].clone_from_slice(&hasher.finalize()[..2]);
-    onion[34] = 3;
-    format!(
-        "{}.onion",
-        base32::encode(base32::Alphabet::RFC4648 { padding: false }, &onion).to_lowercase()
-    )
-}
-
-pub struct BytePrefixOwned {
-    pub byte_prefix: rustacuda::memory::DeviceBuffer<u8>,
-    pub last_byte_idx: usize,
-    pub last_byte_mask: u8,
-    pub out: rustacuda::memory::DeviceBuffer<u8>,
-    pub success: rustacuda::memory::DeviceBox<bool>,
-}
-impl BytePrefixOwned {
-    pub fn from_str(s: &str) -> Self {
-        let byte_prefix = base32::decode(
-            base32::Alphabet::RFC4648 { padding: false },
-            &format!("{}aa", s),
-        )
-        .expect("prefix must be base32");
-        let mut last_byte_idx = 5 * s.len() / 8 - 1;
-        let n_bits = (5 * s.len()) % 8;
-        let last_byte_mask = ((1 << n_bits) - 1) << (8 - n_bits);
-        if last_byte_mask > 0 {
-            last_byte_idx += 1;
-        }
-        let gpu_byte_prefix = rustacuda::memory::DeviceBuffer::from_slice(&byte_prefix).unwrap();
-        let out = [0; 32];
-        let gpu_out = rustacuda::memory::DeviceBuffer::from_slice(&out).unwrap();
-        let success = false;
-        let gpu_success = rustacuda::memory::DeviceBox::new(&success).unwrap();
-        BytePrefixOwned {
-            byte_prefix: gpu_byte_prefix,
-            last_byte_idx,
-            last_byte_mask,
-            out: gpu_out,
-            success: gpu_success,
-        }
-    }
-    pub fn as_byte_prefix(&mut self) -> core::BytePrefix {
-        core::BytePrefix {
-            byte_prefix: self.byte_prefix.as_device_ptr(),
-            byte_prefix_len: self.byte_prefix.len(),
-            last_byte_idx: self.last_byte_idx,
-            last_byte_mask: self.last_byte_mask,
-            out: self.out.as_device_ptr(),
-            success: self.success.as_device_ptr(),
-        }
-    }
-}
-
-fn assert_crypto_rng<Rng: rand::CryptoRng>(rng: Rng) -> Rng {
-    rng
-}
-
-pub fn cuda_try_loop(
-    prefixes: &[String],
-    sender: crossbeam_channel::Sender<[u8; 32]>,
-    tries_sender: crossbeam_channel::Sender<u64>,
-) -> Result<(), Error> {
-    use rustacuda::launch;
-    use rustacuda::memory::DeviceBox;
-    use rustacuda::prelude::*;
-    use std::ffi::CString;
-
-    // Create a context associated to this device
-    // TODO: keep alive
-    rustacuda::init(CudaFlags::empty())?;
-    let mut i = 0;
-    for device in rustacuda::device::Device::devices()? {
-        let device = device?;
-        let prefixes = prefixes.to_owned();
-        let sender = sender.clone();
-        let tries_sender = tries_sender.clone();
-        std::thread::spawn(move || {
-            use rand::RngCore;
-            let mut csprng = assert_crypto_rng(rand::thread_rng());
-            let _context =
-                Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)
-                    .unwrap();
-
-            // Load PTX module
-            let module_data = CString::new(include_str!(env!("KERNEL_PTX_PATH"))).unwrap();
-            let kernel = Module::load_from_string(&module_data).unwrap();
-            let function = kernel
-                .get_function(std::ffi::CStr::from_bytes_with_nul(b"render\0").unwrap())
-                .unwrap();
-
-            // Create a stream to submit work to
-            let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
-
-            // Move seed and prefix to device
-            let mut seed = [0; 32];
-            let mut gpu_seed = DeviceBuffer::from_slice(&seed).unwrap();
-
-            let mut byte_prefixes_owned: Vec<_> = prefixes
-                .into_iter()
-                .map(|a| BytePrefixOwned::from_str(&a))
-                .collect();
-            let mut byte_prefixes: Vec<_> = byte_prefixes_owned
-                .iter_mut()
-                .map(|bp| bp.as_byte_prefix())
-                .collect();
-            let mut gpu_byte_prefixes = DeviceBuffer::from_slice(&byte_prefixes).unwrap();
-
-            // Crate parameters
-            let mut params = DeviceBox::new(&core::KernelParams {
-                seed: gpu_seed.as_device_ptr(),
-                byte_prefixes: gpu_byte_prefixes.as_device_ptr(),
-                byte_prefixes_len: gpu_byte_prefixes.len(),
-            })
-            .unwrap();
-
-            // calculate threads and blocks
-            let fn_max_threads = function
-                .get_attribute(rustacuda::function::FunctionAttribute::MaxThreadsPerBlock)
-                .unwrap() as u32;
-            let fn_registers = function
-                .get_attribute(rustacuda::function::FunctionAttribute::NumRegisters)
-                .unwrap() as u32;
-            let gpu_max_threads = device
-                .get_attribute(rustacuda::device::DeviceAttribute::MaxThreadsPerBlock)
-                .unwrap() as u32;
-            let gpu_max_registers = device
-                .get_attribute(rustacuda::device::DeviceAttribute::MaxRegistersPerBlock)
-                .unwrap() as u32;
-            let gpu_cores = device
-                .get_attribute(rustacuda::device::DeviceAttribute::MultiprocessorCount)
-                .unwrap() as u32;
-
-            let threads = *[
-                fn_max_threads,
-                gpu_max_threads,
-                gpu_max_registers / fn_registers,
-            ]
-            .iter()
-            .min()
-            .unwrap();
-            let blocks = gpu_cores * gpu_max_threads / threads;
-
-            println!(
-                "Launching kernel on device #{} with {} threads and {} blocks",
-                i, threads, blocks
-            );
-
-            loop {
-                csprng.fill_bytes(&mut seed);
-                gpu_seed.copy_from(&seed).unwrap();
-                unsafe {
-                    launch!(kernel.render<<<blocks, threads, 0, stream>>>(params.as_device_ptr()))
-                        .unwrap();
-                }
-
-                // The kernel launch is asynchronous, so we wait for the kernel to finish executing
-                stream.synchronize().unwrap();
-
-                gpu_byte_prefixes.copy_to(&mut byte_prefixes).unwrap();
-
-                for prefix in &mut byte_prefixes_owned {
-                    let mut success = false;
-                    prefix.success.copy_to(&mut success).unwrap();
-                    if success {
-                        prefix.success.copy_from(&false).unwrap();
-                        let mut out = [0; 32];
-                        prefix.out.copy_to(&mut out).unwrap();
-                        sender.send(out).unwrap();
-                    }
-                }
-
-                tries_sender.send(threads as u64 * blocks as u64).unwrap();
-            }
-        });
-        i += 1;
-    }
-    if i == 0 {
-        eprintln!("No cuda devices available.");
-        std::process::exit(2);
-    }
-    Ok(())
-}
-
-const FILE_PREFIX: &'static [u8] = b"== ed25519v1-secret: type0 ==\0\0\0";
-
 fn main() {
-    let app = clap::App::new("t3v")
-        .arg(
-            clap::Arg::with_name("PREFIX")
-                .required(true)
-                .multiple(true)
-                .value_delimiter(",")
-                .help("Desired prefix"),
+    let cli = Cli::parse();
+
+    // Validate output directory
+    if !cli.dst.is_dir() {
+        eprintln!("Error: '{}' is not a directory", cli.dst.display());
+        std::process::exit(1);
+    }
+
+    // Validate prefixes
+    let max_len = cli.prefixes.iter().map(|p| p.len()).max().unwrap_or(0);
+    for prefix in &cli.prefixes {
+        if prefix.is_empty() {
+            eprintln!("Error: Empty prefix not allowed");
+            std::process::exit(1);
+        }
+        // Check if valid base32
+        if base32::decode(
+            base32::Alphabet::Rfc4648Lower { padding: false },
+            &format!("{}aa", prefix),
         )
-        .arg(
-            clap::Arg::with_name("dst")
-                .long("dst")
-                .short("d")
-                .takes_value(true)
-                .help("Destination folder"),
-        );
-    let matches = app.get_matches();
+        .is_none()
+        {
+            eprintln!("Error: '{}' is not a valid base32 prefix", prefix);
+            std::process::exit(1);
+        }
+    }
 
-    let max_len = matches
-        .values_of("PREFIX")
-        .unwrap()
-        .fold(0, |acc, x| std::cmp::max(acc, x.len()));
-    let prefixes: Vec<_> = matches
-        .values_of("PREFIX")
-        .unwrap()
-        .map(|a| a.to_string())
-        .collect();
-    let dst = matches
-        .value_of("dst")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    assert!(dst.is_dir(), "dst must be a directory");
+    println!("=== Tor V3 Vanity Generator ===");
+    println!("Prefixes: {:?}", cli.prefixes);
+    println!("Output: {}", cli.dst.display());
+    println!("CPU threads: {}", cli.threads);
+    println!();
 
-    let (send, recv) = crossbeam_channel::unbounded();
-    let (send_tries, recv_tries) = crossbeam_channel::bounded(1);
-    cuda_try_loop(&prefixes, send, send_tries).unwrap();
+    // Select backend
+    let backend = select_backend_with_mode(cli.mode.into());
+    let info = backend.info();
 
-    std::thread::spawn(move || {
-        let now = Instant::now();
-        let mut last_log = Instant::now();
-        let mut tries = 0_f64;
-        let expected = 2_f64.powi(5 * max_len as i32);
-        loop {
-            tries += recv_tries.recv().unwrap() as f64;
-            let dur = now.elapsed().as_secs_f64();
-            let dur_pretty =
-                PrettyDur(chrono::Duration::from_std(Duration::from_secs_f64(dur)).unwrap());
-            let progress = tries / expected;
-            let expected_dur = dur / progress;
-            let expected_dur_pretty = PrettyDur(
-                chrono::Duration::from_std(Duration::from_secs_f64(expected_dur)).unwrap(),
+    println!();
+    println!("Starting generation...");
+    println!();
+
+    // Set up channels
+    let (progress_tx, progress_rx) = unbounded::<Progress>();
+    let (result_tx, result_rx) = unbounded();
+    let (stop_tx, stop_rx) = crossbeam_channel::bounded(1);
+
+    // Handle Ctrl+C
+    let stop_tx_clone = stop_tx.clone();
+    ctrlc::set_handler(move || {
+        eprintln!("\nStopping...");
+        let _ = stop_tx_clone.send(());
+    })
+    .ok();
+
+    // Clone values for threads
+    let prefixes = cli.prefixes.clone();
+    let dst = cli.dst.clone();
+
+    // Spawn generation thread
+    let gen_handle = std::thread::spawn(move || {
+        backend.generate(prefixes, dst, progress_tx, result_tx, stop_rx)
+    });
+
+    // Progress display thread
+    let start_time = Instant::now();
+    let expected = 2_f64.powi(5 * max_len as i32);
+    let mut last_log = Instant::now();
+    let mut found_count = 0;
+    let total_prefixes = cli.prefixes.len();
+
+    loop {
+        // Check for results
+        while let Ok(result) = result_rx.try_recv() {
+            found_count += 1;
+            println!(
+                "FOUND [{}/{}]: {} -> {}",
+                found_count, total_prefixes, result.prefix, result.onion_address
             );
-            if last_log.elapsed() > Duration::from_secs(30) {
-                println!("Tried {:.0} / {:.0} (expected) keys.", tries, expected);
-                println!(
-                    "Running for {} / {} (expected).",
-                    dur_pretty, expected_dur_pretty
+            println!("  Saved to: {}", result.key_path.display());
+        }
+
+        // Check for progress
+        if let Ok(progress) = progress_rx.try_recv() {
+            if last_log.elapsed() > Duration::from_secs(10) {
+                let dur = progress.elapsed_secs;
+                let dur_pretty = PrettyDur(
+                    chrono::Duration::from_std(Duration::from_secs_f64(dur)).unwrap_or(chrono::Duration::zero()),
                 );
+
+                let progress_pct = progress.keys_checked as f64 / expected;
+                let expected_dur = if progress_pct > 0.0 {
+                    dur / progress_pct
+                } else {
+                    0.0
+                };
+                let expected_dur_pretty = PrettyDur(
+                    chrono::Duration::from_std(Duration::from_secs_f64(expected_dur))
+                        .unwrap_or(chrono::Duration::zero()),
+                );
+
+                println!();
+                println!(
+                    "Progress: {:.2e} / {:.2e} keys ({:.4}%)",
+                    progress.keys_checked as f64,
+                    expected,
+                    progress_pct * 100.0
+                );
+                println!(
+                    "Speed: {:.2} M keys/sec",
+                    progress.keys_per_sec / 1_000_000.0
+                );
+                println!("Elapsed: {} / Est. total: {}", dur_pretty, expected_dur_pretty);
+                println!("Found: {}/{} prefixes", found_count, total_prefixes);
+                println!();
+
                 last_log = Instant::now();
             }
         }
-    });
 
-    loop {
-        use std::io::Write;
+        // Check if generation is done
+        if found_count >= total_prefixes {
+            break;
+        }
 
-        let seed = recv.recv().unwrap();
-        let esk: ed25519_dalek::ExpandedSecretKey =
-            (&ed25519_dalek::SecretKey::from_bytes(&seed).unwrap()).into();
-        let pk: ed25519_dalek::PublicKey = (&esk).into();
-        let onion = pubkey_to_onion(pk.as_bytes());
-        println!("{}", onion);
-        let mut f = std::fs::File::create(dst.join(onion)).unwrap();
-        f.write_all(FILE_PREFIX).unwrap();
-        f.write_all(&esk.to_bytes()).unwrap();
-        f.flush().unwrap();
+        // Small sleep to prevent busy loop
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Check if generator thread has finished
+        if gen_handle.is_finished() {
+            break;
+        }
+    }
+
+    // Wait for generator
+    match gen_handle.join() {
+        Ok(Ok(())) => {
+            println!();
+            println!("=== Complete! ===");
+            println!("Found all {} prefixes in {}", total_prefixes,
+                PrettyDur(chrono::Duration::from_std(start_time.elapsed()).unwrap_or(chrono::Duration::zero())));
+        }
+        Ok(Err(e)) => {
+            eprintln!();
+            eprintln!("Generation stopped: {}", e);
+        }
+        Err(_) => {
+            eprintln!();
+            eprintln!("Generation thread panicked");
+        }
     }
 }

@@ -1,0 +1,55 @@
+[package]
+name = "t3v-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GUI for Tor V3 vanity address generator"
+license = "MIT"
+
+[[bin]]
+name = "t3v-gui"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["tor-v3-vanity/cuda"]
+
+[dependencies]
+# GUI framework
+eframe = "0.29"
+egui = "0.29"
+
+# File dialogs
+rfd = "0.15"
+
+# Core library
+tor-v3-vanity = { path = "..", default-features = false }
+
+# CPU detection
+num_cpus = "1.16"
+
+# Async/threading
+crossbeam-channel = "0.5"
+
+# Time formatting
+chrono = "0.4"
+
+# Default directories
+directories = "5"
+
+# Open files/folders
+open = "5"
+
+# Base32 for validation
+base32 = "0.5"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
+
+# Static CRT on Windows for portable exe
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

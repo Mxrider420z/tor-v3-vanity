@@ -1,7 +1,7 @@
 #![no_std]
 #![cfg_attr(
     any(target_arch = "nvptx", target_arch = "nvptx64"),
-    feature(abi_ptx, stdsimd)
+    feature(abi_ptx, stdarch_nvptx)
 )]
 
 use rustacuda_core::DevicePointer;
