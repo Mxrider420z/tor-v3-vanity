@@ -157,6 +157,10 @@ if (-not $SkipCuda) {
             try {
                 Write-Host "[INFO] Configuring CUDA project..." -ForegroundColor White
 
+                # Temporarily allow errors (CMake warnings go to stderr)
+                $oldErrorAction = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+
                 # Try different Visual Studio generators
                 $configured = $false
                 $generators = @(
@@ -166,7 +170,8 @@ if (-not $SkipCuda) {
                 )
 
                 foreach ($gen in $generators) {
-                    cmake .. -G $gen -A x64 2>$null
+                    Write-Host "[INFO] Trying $gen..." -ForegroundColor Gray
+                    $output = & cmake .. -G $gen -A x64 2>&1
                     if ($LASTEXITCODE -eq 0) {
                         $configured = $true
                         Write-Host "[OK] Configured with $gen" -ForegroundColor Green
@@ -176,12 +181,15 @@ if (-not $SkipCuda) {
 
                 if (-not $configured) {
                     # Try Ninja if VS fails
-                    cmake .. -G Ninja 2>$null
+                    Write-Host "[INFO] Trying Ninja..." -ForegroundColor Gray
+                    $output = & cmake .. -G Ninja 2>&1
                     if ($LASTEXITCODE -eq 0) {
                         $configured = $true
                         Write-Host "[OK] Configured with Ninja" -ForegroundColor Green
                     }
                 }
+
+                $ErrorActionPreference = $oldErrorAction
 
                 if ($configured) {
                     Write-Host "[INFO] Building CUDA project..." -ForegroundColor White
@@ -200,7 +208,8 @@ if (-not $SkipCuda) {
                         Write-Host "[ERROR] CUDA build failed" -ForegroundColor Red
                     }
                 } else {
-                    Write-Host "[ERROR] CMake configuration failed" -ForegroundColor Red
+                    Write-Host "[ERROR] CMake configuration failed. Output:" -ForegroundColor Red
+                    Write-Host $output -ForegroundColor Gray
                 }
             } finally {
                 Pop-Location
