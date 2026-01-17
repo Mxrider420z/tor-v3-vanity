@@ -170,6 +170,10 @@ if (-not $SkipCuda) {
                 )
 
                 foreach ($gen in $generators) {
+                    # Clean CMake cache before trying new generator
+                    Remove-Item -Path "CMakeCache.txt" -ErrorAction SilentlyContinue
+                    Remove-Item -Path "CMakeFiles" -Recurse -ErrorAction SilentlyContinue
+
                     Write-Host "[INFO] Trying $gen..." -ForegroundColor Gray
                     $output = & cmake .. -G $gen -A x64 2>&1
                     if ($LASTEXITCODE -eq 0) {
@@ -180,7 +184,10 @@ if (-not $SkipCuda) {
                 }
 
                 if (-not $configured) {
-                    # Try Ninja if VS fails
+                    # Clean and try Ninja if VS fails
+                    Remove-Item -Path "CMakeCache.txt" -ErrorAction SilentlyContinue
+                    Remove-Item -Path "CMakeFiles" -Recurse -ErrorAction SilentlyContinue
+
                     Write-Host "[INFO] Trying Ninja..." -ForegroundColor Gray
                     $output = & cmake .. -G Ninja 2>&1
                     if ($LASTEXITCODE -eq 0) {
