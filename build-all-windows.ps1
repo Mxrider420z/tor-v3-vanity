@@ -95,6 +95,70 @@ if (-not $SkipCuda) {
         }
     }
 
+    # Try to set up Visual Studio environment if not already configured
+    if (-not $SkipCuda) {
+        $hasCompiler = Get-Command cl.exe -ErrorAction SilentlyContinue
+        if (-not $hasCompiler) {
+            Write-Host "[INFO] Setting up Visual Studio environment..." -ForegroundColor White
+
+            # Find vcvarsall.bat
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vcvarsall = $null
+
+            if (Test-Path $vsWhere) {
+                $vsPath = & $vsWhere -latest -property installationPath 2>$null
+                if ($vsPath) {
+                    $vcvarsall = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+                }
+            }
+
+            # Fallback paths
+            if (-not $vcvarsall -or -not (Test-Path $vcvarsall)) {
+                $fallbackPaths = @(
+                    "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
+                    "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
+                    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
+                    "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
+                    "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat",
+                    "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+                )
+                foreach ($path in $fallbackPaths) {
+                    if (Test-Path $path) {
+                        $vcvarsall = $path
+                        break
+                    }
+                }
+            }
+
+            if ($vcvarsall -and (Test-Path $vcvarsall)) {
+                Write-Host "[INFO] Found: $vcvarsall" -ForegroundColor Gray
+                # Import environment from vcvars64.bat
+                $envBefore = @{}
+                Get-ChildItem env: | ForEach-Object { $envBefore[$_.Name] = $_.Value }
+
+                cmd /c "`"$vcvarsall`" >nul 2>&1 && set" | ForEach-Object {
+                    if ($_ -match "^([^=]+)=(.*)$") {
+                        $name = $matches[1]
+                        $value = $matches[2]
+                        if ($envBefore[$name] -ne $value) {
+                            Set-Item -Path "env:$name" -Value $value
+                        }
+                    }
+                }
+                Write-Host "[OK] Visual Studio environment configured" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] Visual Studio Build Tools not found." -ForegroundColor Yellow
+                Write-Host "       Install from: https://visualstudio.microsoft.com/downloads/" -ForegroundColor Gray
+                Write-Host "       Select 'Desktop development with C++' workload" -ForegroundColor Gray
+                Write-Host "" -ForegroundColor Gray
+                Write-Host "       Or run this script from 'x64 Native Tools Command Prompt'" -ForegroundColor Gray
+                $SkipCuda = $true
+            }
+        } else {
+            Write-Host "[OK] C++ compiler already in PATH" -ForegroundColor Green
+        }
+    }
+
     if (-not $SkipCuda) {
         # Download CUDA project if not present
         $cudaProjectDir = Join-Path $ScriptDir "torv3_vanity_addr_cuda"
